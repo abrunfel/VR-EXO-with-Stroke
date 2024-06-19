@@ -1,0 +1,257 @@
+---
+title: "VR+EXO Stroke Pilot - VR"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+```{r Load packages}
+library(tidyverse)
+library(afex)
+library(readxl)
+library(cowplot)
+```
+
+```{r Set pathnames}
+if(.Platform$OS.type == "unix"){
+path = "//Users//alexbrunfeldt//Dropbox//Catholic U//VR_EXO_Stroke//Data//post_compile"
+p.table.path = "//Users/alexbrunfeldt//Dropbox//Catholic U//VR_EXO_Stroke//Participants//VR_EXO_Stroke_Plist.xlsx"
+#overlap_PyT <- read_excel("/Users/alexbrunfeldt/Library/CloudStorage/Dropbox/Catholic U/VR_EXO_Stroke/Data/post_compile/overlap_PyT.xlsx")
+} else if (.Platform$OS.type == "windows") {
+path = "C://Users//brunfa01//Dropbox//Catholic U//VR_EXO_Stroke//Data//post_compile"
+p.table.path = "C://Users//brunfa01//Dropbox//Catholic U//VR_EXO_Stroke//Participants//VR_EXO_Stroke_Plist.xlsx"
+#overlap_PyT <- read_excel("C:/Users/abrun/Dropbox/Catholic U/VR_EXO_Stroke/Data/post_compile/overlap_PyT.xlsx")
+}
+```
+
+```{r Import Data}
+setwd(path)
+p.table = read_xlsx(p.table.path) # Read in Participant demographic data (need for outlier and lefties)
+
+# Find outliers and left-side affected Ps
+outliers = p.table %>% filter(Remove == 1)
+#outliers = p.table %>% filter(Remove == 1 | FM < 25)
+lefties = p.table %>% filter(Remove == 0, Side.Affected == "L")
+
+uni.data = read.delim('vrexo_stroke_kin_uni.txt',header = FALSE, sep = ",", na.strings = 'NaN') # load in data
+# Make sure the colnames match these (copied straight from Matlab)
+# data = [(1:length(trialData))', targetNum, lhMaxDisp, rhMaxDisp, cursorMaxDisp, relContrib, lhNormS,...
+#     rhNormS, lhNormC, rhNormC, lagOUT, lagLAP, mt, mtLH, mtRH, velPeakLH, t2pvLH, velPeakRH, t2pvRH];
+
+colnames(uni.data) = c('Subject', 'Condition', 'Block', 'Trial', 'Target',
+                      'disp', 'normS', 'normC', 'mt', 'peak.vel', 'time2.peak.vel', 'rt') # rename variables
+
+# Recode Condition to match intervention
+uni.data = uni.data %>% mutate(Condition = recode(Block,
+                                        '1' = "Pre",
+                                        '5' = "Post"))
+
+# Remove outlier participants (ie: those too impaired)
+uni.data = subset(uni.data, !Subject %in% outliers$Subject.ID)
+
+
+# Set Factors
+factors = c('Subject', 'Condition', 'Block', 'Target')
+uni.data[,factors] = lapply(uni.data[,factors], factor)
+
+# Remove trials for which the MT > 10. This is mostly because of 73872901: I had to intervene on several trials because he could not reach the targets
+# Also remove negative reaction times. this is very rare (3 instances) and due to matlab errors
+uni.data = uni.data %>% mutate_if(is.numeric, ~ ifelse(mt > 10 | rt < 0, NA, .))
+
+# Calculate average velocity
+uni.data = uni.data %>% mutate(avg.vel = disp/mt)
+
+```
+
+```{r Data Wrangling, warning = FALSE}
+# Baseline correct the displacement values too
+uni.data = uni.data %>% group_by(Subject) %>%
+  mutate(mt.bc = mt - mean(mt[Block == 1], na.rm = T),
+         peak.vel.bc = peak.vel - mean(peak.vel[Block == 1], na.rm = T),
+         time2.peak.vel.bc = time2.peak.vel - mean(time2.peak.vel[Block == 1], na.rm = T),
+         rt.bc = rt - mean(rt[Block == 1], na.rm = T),
+         avg.vel.bc = avg.vel - mean(avg.vel[Block == 1], na.rm = T))
+
+# ## Outlier clean rel.cont.diff (any value outside 1.5*IQR)
+# # First I need to remove NA and compute rel.cont.diff.oc
+# tmp.data = uni.data %>%
+#   group_by(Subject, Condition, Block) %>%
+#   filter(!is.na(rel.cont.diff))%>%
+#   mutate(rel.cont.diff.oc = replace(rel.cont.diff, (abs(rel.cont.diff - median(rel.cont.diff)) > 1.5*IQR(rel.cont.diff)), NA))
+# 
+# # Then get the dataframe snippet with only NAs and set rel.cont.diff.oc = NA
+# na.data = uni.data %>% filter(is.na(rel.cont.diff)) %>% mutate(rel.cont.diff.oc = NA)
+# # Rebind tmp.data and na.data, then arrange
+# uni.data = rbind(tmp.data, na.data)
+# uni.data = arrange(uni.data, Subject, Condition, Block, Trial)
+# rm(tmp.data, na.data)
+
+# Mean by block
+uni.data.mbb = uni.data %>% select(-c(Trial, Target)) %>% group_by(Subject, Block, Condition) %>% summarise_all(funs(mean(., na.rm = T)))
+
+# SD by block
+uni.data.sdbb = uni.data %>% select(-c(Trial, Target)) %>% group_by(Subject, Block, Condition) %>% summarise_all(funs(sd(., na.rm = T)))
+
+# Reduce data into 'bins' of trials
+nr = nrow(uni.data)
+numTrial = max(uni.data$Trial, na.rm = T)
+numBlock = nlevels(uni.data$Block)
+numSub = nr/numTrial/numBlock
+blockSize = 6 # Must be factor of 54
+uni.data$Bin = as.factor(rep(1:(numTrial/blockSize), each = blockSize, times = numSub*numBlock))
+# Take mean by block
+uni.data.mbbin = uni.data %>% relocate(Bin, .after = Trial) %>% group_by(Subject, Condition, Block, Bin) %>%
+                            summarise_each(funs(mean(., na.rm = TRUE))) %>% select(-c(Trial, Target))
+uni.data.mbbin$Bin = as.numeric(uni.data.mbbin$Bin)
+rm(nr)
+```
+
+# Plotting
+
+```{r Plotting - Displacement, echo=TRUE}
+uni.data %>%
+  ggplot(aes(x = Trial, y = disp, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(18)+
+  ylab('Displacement (m)')
+```
+
+```{r Plotting - MT, echo=TRUE}
+uni.data %>%
+  ggplot(aes(x = Trial, y = mt, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(18)+
+  ylab('Movement Time (s)')
+
+uni.data.mbb %>%
+  mutate(Condition = fct_relevel(Condition, "Pre", "Post")) %>%
+ggplot(aes(x = Condition, y = mt))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(width = 0.1)+
+  theme_cowplot()
+
+uni.data.mbb %>%
+  mutate(Condition = fct_relevel(Condition, "Pre", "Post")) %>%
+  ggplot(aes(x = Condition, y = mt))+
+  geom_point()+
+  geom_line(aes(group = Subject, color = Subject))+
+  theme_cowplot()
+
+
+```
+
+```{r Plotting - Peak velocity, echo=TRUE}
+uni.data %>%
+  ggplot(aes(x = Trial, y = peak.vel, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(18)+
+  ylab('Peak Velocity (m/s)')
+
+uni.data.mbb %>%
+  mutate(Condition = fct_relevel(Condition, "Pre", "Post")) %>%
+ggplot(aes(x = Condition, y = peak.vel))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(width = 0.1)+
+  theme_cowplot()
+```
+
+```{r Plotting - Time to Peak velocity, echo=TRUE}
+uni.data %>%
+  ggplot(aes(x = Trial, y = time2.peak.vel, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(18)+
+  ylab('Time to Peak Velocity (s)')
+
+uni.data.mbb %>%
+  mutate(Condition = fct_relevel(Condition, "Pre", "Post")) %>%
+ggplot(aes(x = Block, y = time2.peak.vel))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(width = 0.1)+
+  theme_cowplot()
+```
+
+```{r Plotting - Average velocity, echo=TRUE}
+uni.data %>%
+  ggplot(aes(x = Trial, y = avg.vel, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(26)+
+  ylab('Average Velocity (m/s)')
+
+uni.data.mbb %>%
+  mutate(Condition = fct_relevel(Condition, "Pre", "Post")) %>%
+ggplot(aes(x = Block, y = avg.vel))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(width = 0.1)+
+  theme_cowplot()
+```
+
+```{r Plotting - Reaction Time, echo=TRUE}
+uni.data %>%
+  ggplot(aes(x = Trial, y = rt, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(18)+
+  ylab('Reaction Time (s)')
+
+uni.data.mbb %>%
+  mutate(Condition = fct_relevel(Condition, "Pre", "Post")) %>%
+ggplot(aes(x = Block, y = rt))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(width = 0.1)+
+  theme_cowplot()
+```
+
+```{r VR (Loading) + Imaging}
+# comment out this... not doing imaging comparisons
+# temp = uni.data.mbb%>%
+#   select(-c(disp, normS, normC, mt.bc, peak.vel.bc, time2.peak.vel.bc, rt.bc, avg.vel.bc))%>% # Remove ".bc" versions of outcomes (and disp, normS, normC)
+#   group_by(Subject)%>%
+#   mutate(delta.mt = mt - mt[Block == 1],
+#          delta.peak.vel = peak.vel - peak.vel[Block == 1],
+#          delta.time2.peak.vel = time2.peak.vel - time2.peak.vel[Block == 1],
+#          delta.rt = rt - rt[Block == 1],
+#          delta.avg.vel = avg.vel - avg.vel[Block == 1])
+# 
+# # NOTE: If you're getting an error with cbind 'Can't recycle...' its because you need the full dataset (no outliers removed, except 73881501 must be removed regardless). To fix, you much change "Remove" in the VR_EXO_Stroke_Plist.xlsx
+# img.vr.pre = cbind(subset(temp, Subject %in% overlap_PyT$Subject & Block == 1),
+#                        subset(overlap_PyT, select = -c(Subject)))
+# img.vr.post = cbind(subset(temp, Subject %in% overlap_PyT$Subject & Block == 5),
+#                        subset(overlap_PyT, select = -c(Subject)))
+# rm(temp)
+# # Pre
+# img.vr.pre %>%
+#   #filter(!Subject == 73872901)%>% 
+#   ggplot(aes(x = wCSTLL, y = mt))+
+#   geom_point()+
+#   geom_smooth(method = lm)+
+#   theme_cowplot()
+# summary(lm(mt ~ wCSTLL, data = img.vr.pre))
+# 
+# # Post
+# img.vr.post %>%
+#   #filter(!Subject == 73872901)%>% 
+#   ggplot(aes(x = wCSTLL, y = delta.mt))+
+#   geom_point()+
+#   geom_smooth(method = lm)+
+#   theme_cowplot()
+# summary(lm(delta.mt ~ wCSTLL, data = img.vr.post))
+```
+
+
+```{r Initial stats, include= FALSE}
+t.test(mt ~ Condition, uni.data.mbb, paired = T)
+t.test(peak.vel ~ Condition, uni.data.mbb, paired = T)
+t.test(time2.peak.vel ~ Condition, uni.data.mbb, paired = T)
+t.test(avg.vel ~ Condition, uni.data.mbb, paired = T)
+t.test(rt ~ Condition, uni.data.mbb, paired = T)
+```

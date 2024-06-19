@@ -1,0 +1,219 @@
+---
+title: "VR+EXO Stroke Pilot - VR"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+```{r Load packages}
+library(tidyverse)
+library(afex)
+library(readxl)
+library(cowplot)
+```
+
+```{r Set pathnames}
+if(.Platform$OS.type == "unix"){
+path = "//Users//alexbrunfeldt//Dropbox//Catholic U//VR_EXO_Stroke//Data//post_compile"
+p.table.path = "//Users/alexbrunfeldt//Dropbox//Catholic U//VR_EXO_Stroke//Participants//VR_EXO_Stroke_Plist.xlsx"
+} else if (.Platform$OS.type == "windows") {
+path = "C://Users//abrun//Dropbox//Catholic U//VR_EXO_Stroke//Data//post_compile"
+p.table.path = "C://Users//abrun//Dropbox//Catholic U//VR_EXO_Stroke//Participants//VR_EXO_Stroke_Plist.xlsx"
+}
+```
+
+```{r Import Data}
+setwd(path)
+p.table = read_xlsx(p.table.path) # Read in Participant demographic data (need for outlier and lefties)
+
+# Find outliers and left-side affected Ps
+outliers = p.table %>% filter(Remove == 1)
+#outliers = p.table %>% filter(Remove == 1 | FM < 25)
+lefties = p.table %>% filter(Remove == 0, Side.Affected == "L")
+
+vr.data = read.delim('vrexo_stroke_kin.txt',header = FALSE, sep = ",", na.strings = 'NaN') # load in data
+# Make sure the colnames match these (copied straight from Matlab)
+# data = [trialNum, targetNum, lhMaxDisp, rhMaxDisp, cursorMaxDisp, relContrib, lhNormS,...
+#     rhNormS, lhNormC, rhNormC, lagOUT, lagLAP, mt, mtLH, mtRH, velPeakLH, t2pvLH, velPeakRH, t2pvRH, rcVP, rtLH, rtRH];  
+
+colnames(vr.data) = c('Subject', 'Condition', 'Block', 'Trial', 'Target',
+                      'disp.lh', 'disp.rh', 'disp.cursor', 'rel.cont',
+                      'lh.normS', 'rh.normS', 'lh.normC', 'rh.normC',
+                      'lag.out', 'lag.lap',
+                      'mt', 'mtLH', 'mtRH',
+                      'peak.vel.lh', 'time2.peak.vel.lh',
+                      'peak.vel.rh', 'time2.peak.vel.rh',
+                      'lh.rt', 'rh.rt') # rename variables
+
+# Recode Condition to match intervention
+vr.data = vr.data %>% mutate(Condition = recode(Block,
+                                        '1' = "Uni-BL Pre",
+                                        '2' = "Bil-BL Pre",
+                                        '3' = "Loading",
+                                        '4' = "Bil-BL Post",
+                                        '5' = "Uni-BL Post"))
+vr.data$rel.cont = 100*vr.data$rel.cont # Convert to %
+
+# Remove outlier participants (ie: those too impaired)
+vr.data = subset(vr.data, !Subject %in% outliers$Subject.ID)
+
+# Invert left-side affected participant RC values (see labbook page 104)
+vr.data = vr.data %>% mutate(rel.cont = case_when(Subject %in% lefties$Subject.ID ~ 100-rel.cont,
+                                                  !Subject %in% lefties$Subject.ID ~ rel.cont))
+
+# Set Factors
+factors = c('Subject', 'Condition', 'Block', 'Target')
+vr.data[,factors] = lapply(vr.data[,factors], factor)
+
+# Remove trials for which the MT > 10. This is mostly because of 73872901: I had to intervene on several trials because he could not reach the targets
+vr.data = vr.data %>% mutate_if(is.numeric, ~ ifelse(mt > 10, NA, .))
+```
+
+```{r Data Wrangling, warning = FALSE}
+# Create new variable: difference measure between each trial and the mean of baseline block 1
+vr.data = vr.data %>% group_by(Subject) %>%
+  mutate(rel.cont.diff = rel.cont - mean(rel.cont[Block == 2], na.rm = T))
+# vr.data = vr.data %>% group_by(Subject) %>%
+#   mutate(rel.cont.diff.preceed = case_when(Block %in% 1 ~ rel.cont - mean(rel.cont[Block == 1]),
+#                                            Block %in% 2 ~ rel.cont - mean(rel.cont[Block == 1]),
+#                                            Block %in% 3 ~ rel.cont - mean(rel.cont[Block == 3]),
+#                                            Block %in% 4 ~ rel.cont - mean(rel.cont[Block == 3]),
+#                                            Block %in% 5 ~ rel.cont - mean(rel.cont[Block == 5])))
+
+# Baseline correct the lh and rh displacement values too
+vr.data = vr.data %>% group_by(Subject) %>%
+  mutate(disp.lh.diff = disp.lh - mean(disp.lh[Block == 2], na.rm = T),
+                        disp.rh.diff = disp.rh - mean(disp.rh[Block == 2], na.rm = T))
+
+## Outlier clean rel.cont.diff (any value outside 1.5*IQR)
+# First I need to remove NA and compute rel.cont.diff.oc
+tmp.data = vr.data %>%
+  group_by(Subject, Condition, Block) %>%
+  filter(!is.na(rel.cont.diff))%>%
+  mutate(rel.cont.diff.oc = replace(rel.cont.diff, (abs(rel.cont.diff - median(rel.cont.diff)) > 1.5*IQR(rel.cont.diff)), NA))
+
+# Then get the dataframe snippet with only NAs and set rel.cont.diff.oc = NA
+na.data = vr.data %>% filter(is.na(rel.cont.diff)) %>% mutate(rel.cont.diff.oc = NA)
+# Rebind tmp.data and na.data, then arrange
+vr.data = rbind(tmp.data, na.data)
+vr.data = arrange(vr.data, Subject, Condition, Block, Trial)
+rm(tmp.data, na.data)
+
+# Mean by block
+vr.data.mbb = vr.data %>% select(-c(Trial, Target)) %>% group_by(Subject, Block, Condition) %>% summarise_all(funs(mean(., na.rm = T)))
+
+# SD by block
+vr.data.sdbb = vr.data %>% select(-c(Trial, Target)) %>% group_by(Subject, Block, Condition) %>% summarise_all(funs(sd(., na.rm = T)))
+
+# Reduce data into 'bins' of trials
+nr = nrow(vr.data)
+numTrial = max(vr.data$Trial, na.rm = T)
+numBlock = nlevels(vr.data$Block)
+numSub = nr/numTrial/numBlock
+blockSize = 6 # Must be factor of 54
+vr.data$Bin = as.factor(rep(1:(numTrial/blockSize), each = blockSize, times = numSub*numBlock))
+# Take mean by block
+vr.data.mbbin = vr.data %>% filter(Trial %in% c(1:numTrial)) %>% relocate(Bin, .after = Trial) %>% group_by(Subject, Condition, Block, Bin) %>%
+                            summarise_each(funs(mean(., na.rm = TRUE))) %>% select(-c(Trial, Target))
+vr.data.mbbin$Bin = as.numeric(vr.data.mbbin$Bin)
+rm(nr)
+```
+
+```{r Intermanual comparisons (hand timing, peak vel), warning=FALSE}
+# Create bimanual dataframe. This has factor 'Hand' to make intermanual comparisons easy
+biman.data = vr.data %>%
+   select(c(Subject, Condition, Block, Trial,
+                             disp.lh, disp.rh, lh.normC, rh.normC, lh.normS, rh.normS,
+                             mtLH, mtRH, peak.vel.lh, peak.vel.rh, time2.peak.vel.lh, time2.peak.vel.rh, lh.rt, rh.rt))%>%
+  filter(!is.na(Trial))%>% # One patient could not finish the task, so they have NA for the last few trials, need to remove those before pivoting
+   rename(lh.disp = disp.lh, rh.disp = disp.rh, lh.mt = mtLH, rh.mt = mtRH,
+          lh.velPeak = peak.vel.lh, rh.velPeak = peak.vel.rh, lh.time2pv = time2.peak.vel.lh, rh.time2pv = time2.peak.vel.rh)%>%
+   pivot_longer(cols = !c(Subject, Condition, Block, Trial), names_sep = "\\.", names_to = c("Hand", "Var"), values_to = "value")%>%
+   pivot_wider(names_from = Var, values_from = value)
+
+# Rename rh and lh to "Impaired" or "Non-Impaired" based on handedness of participant
+biman.data = biman.data %>%
+  mutate(Hand = case_when(
+    Subject %in% lefties & Hand == "rh" ~ "Non-Impaired",
+    Subject %in% lefties & Hand == "lh" ~ "Impaired",
+    !Subject %in% lefties & Hand == "rh" ~ "Impaired",
+    !Subject %in% lefties & Hand == "lh" ~ "Non-Impaired",
+    TRUE ~ Hand
+  ))
+biman.data$Hand = as.factor(biman.data$Hand) # Convert from char to factor
+biman.data = as.data.frame(biman.data)
+
+# # Baseline correct
+#  biman.data = biman.data %>% group_by(Subject, Hand) %>% mutate_each(funs(bc = .-mean(.[Block==2])), -c(Condition, Block, Trial))
+ 
+# Mean by block
+biman.data.mbb = biman.data %>% #select(-Block, -Trial) %>%
+  group_by(Subject, Condition, Block, Hand) %>%
+  summarise_all(funs(mean(., na.rm = TRUE)))
+
+# This is an alternaltive option for movement time data. Since cursor MT is calculated differently than the individual hand MTs
+# Cursor: start/stop are a result of indSpawn and indHit from Matlab (cursor + block collision)
+# Hands: start/stop are a result of hand reaching its maximum displacement
+ mt.data = vr.data %>% select(c(Subject, Condition, Block, mt, mtLH, mtRH)) %>%
+   rename(cursor = mt, left = mtLH, right = mtRH) %>%
+   pivot_longer(!c(Subject, Condition, Block), names_to = "Hand", values_to = "mt") %>% arrange(Hand)
+ mt.data = mt.data %>% group_by(Subject, Hand) %>% mutate(mt.diff = mt - mean(mt[Block == 1]))
+ mt.data.mbb = mt.data %>% group_by(Subject, Condition, Block, Hand) %>% summarise_all(funs(mean(., na.rm = T)))
+```
+
+```{r Plotting, echo=TRUE}
+vr.data %>% mutate(Condition = recode_factor(Condition, 'Bil-BL Pre' = 'Pre', 'Bil-BL Post' = 'Post')) %>%
+  ggplot(aes(x = Trial, y = rel.cont, color = Condition))+
+  stat_summary(fun.data = 'mean_se', position = position_dodge(width = 0.5))+
+  stat_summary(fun.data = 'mean_se', geom = 'line', position = position_dodge(width = 0.5))+
+  theme_cowplot(26)+
+  ylab('Relative Contribution (%)')
+                                  
+
+vr.data %>%
+  mutate(Condition = fct_relevel(Condition, "Bil-BL Pre", "Loading", "Bil-BL Post")) %>%
+ggplot(aes(x = Condition, y = rel.cont))+
+  geom_boxplot()+
+  theme_cowplot()
+
+ggplot(data = vr.data, aes(x = Trial, y = rel.cont, color = Condition))+
+  geom_point()+
+  geom_hline(yintercept = 50, linetype = 'dashed')+
+  facet_grid(rows = vars(Block), cols = vars(Subject))+
+  theme_cowplot()+
+  panel_border()+
+  ylab('Relative Contribution (%)')
+
+vr.data %>% filter(!Target %in% NA) %>%
+  mutate(Condition = fct_relevel(Condition, "Bil-BL Pre", "Loading", "Bil-BL Post")) %>%
+ggplot(aes(x = Target, y = rel.cont, fill = Condition))+
+  geom_boxplot()+
+  geom_hline(yintercept = 50, linetype = 'dashed')+
+  theme_cowplot()+
+  ylab('Relative Contribution (%)')
+
+```
+
+```{r Initial stats, include= FALSE}
+# # Remove outliers
+# vr.data.mbb = vr.data.mbb %>% filter(!Subject %in% outliers)
+# # ANOVA comparing conditions: Baseline (only block 1) vs. LH weighted, vs. RH weighted
+aov_ez(data = subset(vr.data.mbb, !Block %in% c(1,5)), id = "Subject", dv = "rel.cont", within = "Condition")
+# Followup t-tests
+t.test(rel.cont ~ Block, subset(vr.data.mbb, Block %in% c(2,3)), paired = T)
+t.test(rel.cont ~ Block, subset(vr.data.mbb, Block %in% c(2,4)), paired = T)
+t.test(rel.cont ~ Block, subset(vr.data.mbb, Block %in% c(3,4)), paired = T)
+
+# 
+# # T.test using the rel.cont.diff variable (should give exact same result as the 3rd contrast above...)
+# t.test(subset(vr.data.mbb, Condition == "LH weighted")$rel.cont.diff, subset(vr.data.mbb, Condition == "RH weighted")$rel.cont.diff, paired = T)
+# 
+# # T.test using the re.cont.diff.preceed variable means correcting for any potential bias accumulated in the 2nd block. This should be negligible since we are counterbalancing, but its a good check anyway.
+# t.test(subset(vr.data.mbb, Condition == "LH weighted")$rel.cont.diff.preceed, subset(vr.data.mbb, Condition == "RH weighted")$rel.cont.diff.preceed, paired = T)
+# 
+# # ANOVA with the 'Binned' data. Allows to check for main effect of time (rel. cont. changing overtime due to fatigue or learning)
+# aov_ez(data = subset(vr.data.mbbin, !Block %in% c(3,5) & Bin %in% c(1,16)), id = "Subject", dv = "rel.cont", within = c("Condition","Bin"))
+```

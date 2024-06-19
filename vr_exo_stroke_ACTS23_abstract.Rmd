@@ -1,0 +1,89 @@
+---
+title: "vr_exo_stroke_ACTS23_abstract"
+output: html_document
+date: "2022-11-01"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(afex)
+library(effsize)
+library(emmeans)
+```
+
+```{r Import Data, include = F}
+if(.Platform$OS.type == "unix"){
+
+} else if (.Platform$OS.type == "windows") {
+  setwd('C:/Users/abrun/Dropbox/Catholic U/VR_EXO_Stroke/Routput/')
+  load("C:/Users/abrun/Dropbox/Catholic U/VR_EXO_Stroke/Routput/230105-VREXO-Stroke-WS-NOremoval.RData")
+}
+```
+
+```{r RC stats, echo=F}
+dat = subset(vr.data.mbb)
+t.test(subset(dat, Block == 2)$rel.cont, mu = 50)
+aov.rc = aov_ez(data = dat, id = "Subject", dv = "rel.cont", within = "Block")
+#knitr::kable(nice(aov.rc))
+aov.rc
+means.rc = emmeans(aov.rc, ~ Block)
+means.rc
+pairs(means.rc)
+eff_size(means.rc, sigma = sd(dat$rel.cont), edf = df.residual(aov.rc$lm))
+rm(dat)
+# See https://cran.r-project.org/web/packages/afex/vignettes/afex_anova_example.html for information on emmeans() and pairs()
+# See https://rdrr.io/cran/emmeans/man/eff_size.html for information on effect sizes. Note: for sigma, I'm using the SD of the entire dataset. There are many ways to do this (i.e., average of SD per sample, RMS of sample SDs, etc.), but the difference is negligible.
+```
+
+```{r RMS Activity - Deltoid stats, echo=F}
+mc.outlier = c('73881501')
+dat = subset(emg.data.mbb, Muscle %in% c('Non-Impaired Deltoid', 'Impaired Deltoid') & !Subject %in% mc.outlier & !Block %in% 2)
+aov.rms.delt = aov_ez(data = dat, id = "Subject", dv = "rmse.norm.bc", within = c("Muscle","Block"))
+#knitr::kable(nice(aov.rms.delt))
+aov.rms.delt
+means.rms.delt = emmeans(aov.rms.delt, ~ Muscle + Block)
+means.rms.delt
+pairs(means.rms.delt)
+eff_size(means.rms.delt, sigma = sd(dat$rmse.norm.bc), edf = df.residual(aov.rms.delt$lm))
+rm(dat)
+
+# Those contrasts don't look right... for example, Impaired.Deltoid Loading (x3) vs. Impaired.Deltoid Post (x4) is p = 0.02, but Impaired.Deltoid Loading vs. Imapired.Deltoid Post is p = 0.08. Try these comparisons...
+
+t.test(rmse.norm.bc ~ Muscle, subset(emg.data.mbb, Muscle %in% c('Non-Impaired Deltoid', 'Impaired Deltoid') & !Subject %in% mc.outlier & Block %in% 3))
+t.test(subset(emg.data.mbb, Muscle %in% c('Non-Impaired Deltoid') & !Subject %in% mc.outlier & Block %in% 3)$rmse.norm.bc, mu = 0, paried = FALSE)
+t.test(subset(emg.data.mbb, Muscle %in% c('Impaired Deltoid') & !Subject %in% mc.outlier & Block %in% 3)$rmse.norm.bc, mu = 0, paried = FALSE)
+
+t.test(rmse.norm.bc ~ Muscle, subset(emg.data.mbb, Muscle %in% c('Non-Impaired Deltoid', 'Impaired Deltoid') & !Subject %in% mc.outlier & Block %in% 4))
+t.test(subset(emg.data.mbb, Muscle %in% c('Non-Impaired Deltoid') & !Subject %in% mc.outlier & Block %in% 4)$rmse.norm.bc, mu = 0, paried = FALSE)
+t.test(subset(emg.data.mbb, Muscle %in% c('Impaired Deltoid') & !Subject %in% mc.outlier & Block %in% 4)$rmse.norm.bc, mu = 0, paried = FALSE)
+```
+
+```{r MC - Deltoid stats, echo=F}
+mc.outlier = c('73881501')
+dat = subset(emg.data.ratio.mbb, Muscle == "Deltoid" & !Subject %in% mc.outlier)
+t.test(subset(dat, Block == 2)$rmse.norm, mu = 50)
+aov.mc.delt = aov_ez(data = dat, id = "Subject", dv = "rmse.norm", within = "Block") #knitr::kable(nice(aov.mc.delt))
+aov.mc.delt
+means.mc.delt = emmeans(aov.mc.delt, ~ Block)
+means.mc.delt
+pairs(means.mc.delt)
+eff_size(means.mc.delt, sigma = sd(dat$rmse.norm), edf = df.residual(aov.mc.delt$lm))
+rm(dat)
+```
+
+```{r MC - Bicep stats, echo=F}
+mc.outlier = c('73881501')
+dat = subset(emg.data.ratio.mbb, Muscle == "Bicep" & !Subject %in% mc.outlier)
+t.test(subset(dat, Block == 2)$rmse.norm, mu = 50)
+aov.mc.bicep = aov_ez(data = dat, id = "Subject", dv = "rmse.norm", within = "Block") #knitr::kable(nice(aov.mc.bicep))
+aov.mc.bicep
+means.mc.bicep = emmeans(aov.mc.bicep, ~ Block)
+means.mc.bicep
+pairs(means.mc.bicep)
+eff_size(means.mc.bicep, sigma = sd(dat$rmse.norm), edf = df.residual(aov.mc.bicep$lm))
+rm(dat)
+```

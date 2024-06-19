@@ -1,0 +1,258 @@
+---
+title: "VR+EXO Stroke - EMG"
+# NOTE: this version is adapted from "vr_exo_stroke_emg_pilot_v03.Rmd"
+output: html_document
+---
+
+## Load packages
+```{r Load packages}
+library(tidyverse)
+library(afex)
+library(readxl)
+library(cowplot)
+```
+
+```{r Set pathnames}
+if(.Platform$OS.type == "unix"){
+path = "//Users//alexbrunfeldt//Dropbox//Catholic U//VR_EXO_Stroke//Data//post_compile"
+p.table.path = "//Users/alexbrunfeldt//Dropbox//Catholic U//VR_EXO_Stroke//Participants//VR_EXO_Stroke_Plist.xlsx"
+} else if (.Platform$OS.type == "windows") {
+path = "C://Users//abrun//Dropbox//Catholic U//VR_EXO_Stroke//Data//post_compile"
+p.table.path = "C://Users//abrun//Dropbox//Catholic U//VR_EXO_Stroke//Participants//VR_EXO_Stroke_Plist.xlsx"
+}
+```
+
+```{r Import EMG data}
+setwd(path)
+p.table = read_xlsx(p.table.path) # Read in Participant demographic data (need for outlier and lefties)
+
+# Find outliers and left-side affected Ps
+outliers = p.table %>% filter(Remove == 1)
+#outliers = p.table %>% filter(Remove == 1 | FM < 25)
+lefties = p.table %>% filter(Remove == 0, Side.Affected == "L")
+
+setwd(path)
+emg.data = read.delim('vrexo_stroke_emgRMSE.txt',header = FALSE, sep = ",", na.strings = 'NaN') # load in data
+ci.data = read.delim('vrexo_stroke_emgCI.txt',header = FALSE, sep = ",", na.strings = 'NaN') # load in data
+
+# PC computer
+# setwd('C:\\Users\\Alex\\Dropbox\\Catholic U\\VR_EXO_Stroke\\Data\\post_compile') # PC
+# emg.data = read.delim('vrexo_stroke_emgRMSE.txt',header = FALSE, sep = ",", na.strings = 'NaN') # load in data
+# ci.data = read.delim('vrexo_stroke_emgCI.txt',header = FALSE, sep = ",", na.strings = 'NaN') # load in data
+
+# Make sure the colnames match these (copied straight from Matlab)
+colnames(emg.data) = c('Subject', 'Condition', 'Block', 'Trial', 'Muscle', 'Target', 'rmse', 'rmse.norm')
+emg.data$rmse = emg.data$rmse*1000 # convert to mV
+colnames(ci.data) = c('Subject', 'Condition', 'Block', 'Trial', 'Muscle', 'Band', 'Target', 'CI')
+
+# Create new 'Level' factor. 
+shoulder = c(6,8,10)
+ci.data = ci.data %>% mutate(Level = case_when(Target %in% shoulder ~ "Shoulder", !Target %in% shoulder ~ "Eye")) %>% relocate(Level, .after = Target)
+emg.data = emg.data %>% mutate(Level = case_when(Target %in% shoulder ~ "Shoulder", !Target %in% shoulder ~ "Eye")) %>% relocate(Level, .after = Target)
+
+# Create new 'Location' factor
+loc = c(5,6) # Left of center targets
+mid = c(7,8) # Midline targets
+roc = c(9,10) # Right of center targets
+ci.data = ci.data %>% mutate(Location = case_when(Target %in% loc ~ "Left of center",
+                                                  Target %in% mid ~ "Midline",
+                                                  Target %in% roc ~ "Right of center")) %>% relocate(Location, .after = Level)
+
+emg.data = emg.data %>% mutate(Location = case_when(Target %in% loc ~ "Left of center",
+                                                    Target %in% mid ~ "Midline",
+                                                    Target %in% roc ~ "Right of center")) %>% relocate(Location, .after = Level)
+
+# Recode Condition to match intervention
+emg.data = emg.data %>% mutate(Condition = recode(Block, '1' = "Uni Pre", '2' = "Pre", '3' = "Loading", '4' = 'Post', '5' = 'Uni Post')) %>%
+  mutate(Muscle = recode(Muscle,'1' = "L Deltoid", '2' = "R Deltoid", '3' = "L Bicep", '4' = "R Bicep"))
+emg.data$Condition = as.factor(emg.data$Condition)
+# Recode Muscle to specify impairment (need "lefties" var from exo_cvr_kinematics script)
+# NOTE: Using pivot_longer() to break apart "Impairment" (yes/no) from Muscle (delt/bicep) is the best practice here. I'm rushed so i'm not doing it now...
+emg.data = emg.data %>% mutate(Muscle = case_when(Subject %in% lefties & Muscle == "L Deltoid" ~ "Impaired Deltoid",
+                                                  Subject %in% lefties & Muscle == "R Deltoid" ~ "Non-Impaired Deltoid",
+                                                  Subject %in% lefties & Muscle == "L Bicep" ~ "Impaired Bicep",
+                                                  Subject %in% lefties & Muscle == "R Bicep" ~ "Non-Impaired Bicep",
+
+                                                  !Subject %in% lefties & Muscle == "L Deltoid" ~ "Non-Impaired Deltoid",
+                                                  !Subject %in% lefties & Muscle == "R Deltoid" ~ "Impaired Deltoid",
+                                                  !Subject %in% lefties & Muscle == "L Bicep" ~ "Non-Impaired Bicep",
+                                                  !Subject %in% lefties & Muscle == "R Bicep" ~ "Impaired Bicep"))
+
+
+ci.data = ci.data %>% mutate(Condition = recode(Block, '1' = "Uni Pre", '2' = "Pre", '3' = "Loading", '4' = 'Post', '5' = 'Uni Post')) %>%
+  mutate(Muscle = recode(Muscle,'1' = "Deltoid", '2' = "Biceps")) %>% mutate(Band = recode(Band, '1' = "Alpha", '2' = "Beta", '3' = "Gamma"))
+ci.data$Condition = as.factor(ci.data$Condition)
+# Remove outlier participants (ie: left handers, no-shows, etc...)
+emg.data = subset(emg.data, !Subject %in% outliers$Subject.ID)
+ci.data = subset(ci.data, !Subject %in% outliers$Subject.ID)
+
+# Number of subjects
+nchan = 4 # Number of EMG channels
+nsub = nlevels(emg.data$Subject)
+nblk = nlevels(emg.data$Block)
+tempID = levels(emg.data$Subject) # vector of subject levels
+
+# Set Factors
+factors = c('Subject', 'Condition', 'Block', 'Muscle', 'Target')
+emg.data[,factors] = lapply(emg.data[,factors], factor)
+factors = c('Subject', 'Condition', 'Block', 'Muscle', 'Band', 'Target')
+ci.data[,factors] = lapply(ci.data[,factors], factor)
+```
+
+```{r Data Wrangling, warning=FALSE}
+# Baseline correct (% Change from Block 2; pllus an option to median baseline correct)
+emg.data = emg.data %>% group_by(Subject, Muscle) %>% mutate(rmse.bc = 100*(rmse - mean(rmse[Block == 2]))/mean(rmse[Block == 2]),
+                                                             rmse.norm.bc = 100*(rmse.norm - mean(rmse.norm[Block == 2]))/mean(rmse.norm[Block == 2]))
+# emg.data = emg.data %>% group_by(Subject, Muscle) %>% mutate(rmse.bc = 100*(rmse - median(rmse[Block == 2]))/median(rmse[Block == 2]),
+#                                                              rmse.norm.bc = 100*(rmse.norm - median(rmse.norm[Block == 2]))/median(rmse.norm[Block == 2]))
+
+# Outlier clean rmse
+emg.data <- emg.data %>%
+  mutate(rmse.norm.oc = if_else(rmse.norm > 200, NA_real_, rmse.norm))
+rmse.outlier.percent = (sum(is.na(emg.data$rmse.norm.oc))-sum(is.na(emg.data$rmse.norm)))/nrow(emg.data)
+
+
+# Create new rmse ratio. Impaired side rmse divided by Non-impaired side rmse. THis is so janky... pure hack job
+emg.data.Idelt = subset(emg.data, Muscle %in% c("Impaired Deltoid"))
+emg.data.Ndelt = subset(emg.data, Muscle %in% c("Non-Impaired Deltoid"))
+ratio = emg.data.Idelt$rmse/(emg.data.Idelt$rmse + emg.data.Ndelt$rmse)
+ratio.norm = emg.data.Idelt$rmse.norm/(emg.data.Idelt$rmse.norm + emg.data.Ndelt$rmse.norm)
+emg.data.delt = cbind(subset(emg.data.Idelt, select = -c(Muscle, rmse, rmse.norm, rmse.bc, rmse.norm.bc)), ratio)
+emg.data.delt = cbind(emg.data.delt, ratio.norm)
+emg.data.delt = emg.data.delt %>% rename(rmse = ...9, rmse.norm = ...10) %>% # WARNING: The column numbers might change if columns are added/subtracted
+                mutate(Muscle = "Deltoid") %>%
+                relocate(Muscle, .after = Target)
+rm(emg.data.Ndelt, emg.data.Idelt, ratio, ratio.norm)
+
+emg.data.Ibicep = subset(emg.data, Muscle %in% c("Impaired Bicep"))
+emg.data.Nbicep = subset(emg.data, Muscle %in% c("Non-Impaired Bicep"))
+ratio = emg.data.Ibicep$rmse/(emg.data.Ibicep$rmse + emg.data.Nbicep$rmse)
+ratio.norm = emg.data.Ibicep$rmse.norm/(emg.data.Ibicep$rmse.norm + emg.data.Nbicep$rmse.norm)
+emg.data.bicep = cbind(subset(emg.data.Ibicep, select = -c(Muscle, rmse, rmse.norm, rmse.bc, rmse.norm.bc)), ratio)
+emg.data.bicep = cbind(emg.data.bicep, ratio.norm)
+emg.data.bicep = emg.data.bicep %>% rename(rmse = ...9, rmse.norm = ...10) %>% # WARNING: The column numbers might change if columns are added/subtracted
+                mutate(Muscle = "Bicep") %>%
+                relocate(Muscle, .after = Target)
+rm(emg.data.Nbicep, emg.data.Ibicep, ratio, ratio.norm)
+
+# Rebind the dataframes
+emg.data.ratio = rbind(emg.data.bicep, emg.data.delt)
+rm(emg.data.bicep, emg.data.delt)
+emg.data.ratio$Muscle = as.factor(emg.data.ratio$Muscle)
+emg.data.ratio$rmse = 100*emg.data.ratio$rmse # Convert to %
+emg.data.ratio$rmse.norm = 100*emg.data.ratio$rmse.norm # Convert to %
+
+# Baseline correct rmse ratio and ratio.norm
+# As a %-change score
+# emg.data.ratio = emg.data.ratio %>% group_by(Subject, Muscle) %>% mutate(rmse.bc = 100*(rmse - mean(rmse[Block == 2]))/mean(rmse[Block == 2]))
+
+# As was done for Relative Contribution (and an option to median bc)
+emg.data.ratio = emg.data.ratio %>% group_by(Subject, Muscle) %>% mutate(rmse.bc = rmse - mean(rmse[Block == 2]))
+emg.data.ratio = emg.data.ratio %>% group_by(Subject, Muscle) %>% mutate(rmse.norm.bc = rmse.norm - mean(rmse.norm[Block == 2]))
+# emg.data.ratio = emg.data.ratio %>% group_by(Subject, Muscle) %>% mutate(rmse.bc = rmse - median(rmse[Block == 2]))
+# emg.data.ratio = emg.data.ratio %>% group_by(Subject, Muscle) %>% mutate(rmse.norm.bc = rmse.norm - median(rmse.norm[Block == 2]))
+
+# Outlier clean rmse.bc (any value outside 1.5*IQR)
+emg.data.ratio = emg.data.ratio %>% 
+  group_by(Subject, Condition, Muscle, Block) %>%
+  mutate(rmse.bc.oc = replace(rmse.bc, (abs(rmse.bc - median(rmse.bc, na.rm = T)) > 1.5*IQR(rmse.bc, na.rm = T)), NA),
+         rmse.norm.bc.oc = replace(rmse.norm.bc, (abs(rmse.norm.bc - median(rmse.norm.bc, na.rm = T)) > 1.5*IQR(rmse.norm.bc, na.rm = T)), NA))
+
+# emg.data - Mean by block
+emg.data.mbb = emg.data %>% select(-c(Trial, Target, Level, Location))%>%
+  group_by(Subject, Block, Condition, Muscle)%>%
+  summarise_all(funs(mean(., na.rm = T)))
+
+# emg.data.ratio - Mean by block
+emg.data.ratio.mbb = emg.data.ratio %>% select(-c(Trial, Target, Level, Location))%>%
+  group_by(Subject, Block, Condition, Muscle)%>%
+  summarise_all(funs(mean(., na.rm = T)))
+
+# emg.data.ratio - SD by block
+emg.data.ratio.sdbb = emg.data.ratio %>% select(-c(Trial, Target, Level, Location))%>%
+  group_by(Subject, Block, Condition, Muscle)%>%
+  summarise_all(funs(sd(., na.rm = T)))
+```
+
+
+```{r RMS Plotting, echo=FALSE}
+######## RMSE plotting ############3
+emg.data %>% filter(Muscle == c('Non-Impaired Deltoid', 'Impaired Deltoid')) %>%
+  ggplot(aes(x = Trial, y = rmse.norm.bc, color = Muscle))+
+  geom_point()+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  facet_grid(rows = vars(Block), cols = vars(Subject))+
+  theme_cowplot()+
+  panel_border()+
+  ylab('RMS Muscle activity (bc) (% change)')
+
+ggplot(data = subset(emg.data, Muscle == c('Non-Impaired Deltoid', 'Impaired Deltoid') & !Block %in% c(4)), aes(x = Trial, y = rmse.norm.bc, color = Muscle))+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  stat_summary(fun.data = 'mean_se')+
+  facet_grid(~Condition)+
+  labs(y = "Baseline corrected, normalized RMS (% Change)")+
+  theme(text = element_text(size = 14),
+        axis.text = element_text(size = 14))
+
+emg.data %>% filter(Muscle == c('Non-Impaired Deltoid', 'Impaired Deltoid') & !Block %in% c(4)) %>%
+  ggplot(aes(x = Muscle, y = rmse.norm.bc, color = Condition))+
+  geom_boxplot()+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  theme_cowplot()+
+  panel_border()+
+  ylab('Baseline corrected, normalized RMS (% Change)')
+
+ggplot(data = subset(emg.data, Muscle == c('Non-Impaired Bicep', 'Impaired Bicep') & !Block %in% c(4)), aes(x = Trial, y = rmse.norm.bc, color = Muscle))+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  stat_summary(fun.data = 'mean_se')+
+  facet_grid(~Condition)+
+  labs(y = "Baseline corrected, normalized RMS (% Change)")+
+  theme(text = element_text(size = 14),
+        axis.text = element_text(size = 14))
+```
+
+
+```{r MC Plotting}
+##### Muscle Contribution #########
+# Individual plots
+# emg.data.ratio %>% filter(Subject == c(73873601) & Muscle == "Bicep" & Condition == "Loading") %>%
+#   ggplot(aes(x = rmse.norm.bc.oc))+
+#   geom_histogram()
+
+emg.data.ratio %>% filter(Muscle == c('Deltoid')) %>%
+  ggplot(aes(x = Trial, y = rmse.norm.bc.oc, color = Condition))+
+  geom_point()+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  facet_grid(rows = vars(Block), cols = vars(Subject))+
+  theme_cowplot()+
+  panel_border()+
+  ylab('Muscle Contribution (bc, norm, oc) (% change)')
+
+emg.data.ratio %>% filter(Muscle == c('Deltoid')) %>%
+  ggplot(aes(x = Block, y = rmse.norm.bc.oc, color = Condition))+
+  geom_boxplot()+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  theme_cowplot()+
+  panel_border()+
+  ylab('Muscle Contribution (bc, norm, oc) (% change)')
+
+ggplot(data = subset(emg.data.ratio, !Block %in% c(4)), aes(x = Trial, y = rmse.norm.bc, color = Condition))+
+  geom_hline(yintercept = 1, linetype = 'dashed')+
+  stat_summary(fun.data = 'mean_se')+
+  facet_grid(~Muscle)+
+  labs(y = "\u0394 I/NI rmse ratio (%)")+
+  theme(text = element_text(size = 14),
+        axis.text = element_text(size = 14))
+  
+###### Coherence Integral plotting ################
+ggplot(data = ci.data, aes(x = Trial, y = CI, color = Band))+
+  #geom_point()+
+  geom_smooth()+
+  facet_grid(Condition~Muscle)
+
+ggplot(data = ci.data, aes(x = Muscle, y = CI, fill = Condition))+
+  geom_boxplot()+
+  facet_grid(~Band)
+```
+
+
